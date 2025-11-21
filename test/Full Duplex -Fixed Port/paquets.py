@@ -3,7 +3,7 @@ import netifaces
 import time
 import threading
 import binascii
-from typing import Callable
+from typing import Callable, Optional
 
 
 def trafic_libre(ip, port, duree):
@@ -35,7 +35,7 @@ def trafic_libre(ip, port, duree):
 
 def charger_pacquet(id: int, bits: bytes, fdc: Callable = NotImplemented, cle : bytes = bytes(0)):
     """
-    Prepare un pacquet de bits
+    Prepare un paquet de bits
 
     Utilise le CRC-32 pour détecter les 
     collisions d'un packet d'un message.
@@ -74,7 +74,7 @@ def charger_octets(octets: bytes, fdc: Callable = NotImplemented, cle : bytes = 
 
     Fonction de chiffrement optionelle. 
     Structure de l'entête:
-        [Nombre de packets: 5 octets] [Nombre d'octets dans le dernier message: 2 octets] [Type de contenu: 1 octet] [Données supplémentaires optionel: 4 octets] [CRC: 4 octets]
+        [Nombre de paquets: 5 octets] [Nombre d'octets dans le dernier message: 2 octets] [Type de contenu: 1 octet] [Données supplémentaires optionel: 4 octets] [CRC: 4 octets]
     
     Structure d'un packet :
         [Numéro d'ordre: 5 octets] [message: 1431 octets] [CRC: 4 octets]
@@ -87,8 +87,8 @@ def charger_octets(octets: bytes, fdc: Callable = NotImplemented, cle : bytes = 
         tdc: Le type de contenu envoyé, O pour une chaine de caractères
         infos_sup: 4 octets supplemantaire pour n'importe quels infos qu'on veut ajouter. Sert aussi a rendre le message de taille 16 octets
 
-    Returns:[charger_p
-        Retourne une liste composé de l'entête puis de packets du message
+    Returns:
+        Retourne une liste composé de l'entête puis de paquets du message
     """
 
     #On commence par diviser la sequence en pacquets de bits
@@ -110,5 +110,82 @@ def charger_octets(octets: bytes, fdc: Callable = NotImplemented, cle : bytes = 
     octets_complet = octets+bits_manquant
     
     return [entete_charge]+[charger_pacquet(i,octets_complet[i*1431:(i+1)*1431],fdc,cle) for i in range(ndp)]
+    
+class CRCError(Exception):
+    """Erreur sur la valeur deu CRC"""
+    pass
+
+
+def sectionner(liste: list, delimiteurs: list[int]):
+    """Tranche une liste en sous listes en utilisant les délimiteurs"""
+    return [liste[delimiteurs[i]:delimiteurs[i+1]] for i in range(len(delimiteurs)-1)]
+
+
+def decharger_paquet(paquet: bytes, fdd: Callable = NotImplemented, cle: bytes = None):
+    """
+    Recupere une série d'octets et retourne une liste contenants
+    le numero d'ordre, le méssage et le CRC si le CRC correspond
+    """
+    if len(paquet) != 1440:
+        raise ValueError("La taille du paquet doit être egal à 1440")
+    pack = paquet[0:1436] # contenu du paquet sans CRC
+    crc = paquet[1436:1440]
+    if crc != binascii.crc32(pack).to_bytes(4,'big'):
+        raise CRCError("CRC invalide, paquet corrompu")
+    else:
+        return sectionner(paquet,[0,5,1436,1440])
+    
+
+def decharger_entete(entete: bytes):
+    """
+    Recupere une série d'octets et recupere l'entete du message
+    comme liste de ses composants 
+    Structure de l'entête:
+        [Nombre de paquets: 5 octets] [Nombre d'octets dans le dernier message: 2 octets] [Type de contenu: 1 octet] [Données supplémentaires optionel: 4 octets] [CRC: 4 octets]
+    
+    """
+    if len(entete) != 16:
+        raise ValueError("La taille de l'entête doit être de 16 octets")
+
+    pack = entete[0:12]
+    crc = entete[12:16]
+    if crc != binascii.crc32(pack).to_bytes(4,'big'):
+        raise CRCError("CRC invalide, paquet corrompu")
+    else:
+        return sectionner(entete,[0,5,7,8,12,16])
+    
+class TimeOutExeption(Exception):
+    """Le temps imparti est épuisé"""
+    pass
+
+
+
+# Cette fonction n'a pas encore été implémenté
+def envoyer_octets(octets: bytes, sock_destination: socket.socket, timeout: int, 
+                   ecouteur: Callable,fdc: Optional[callable],
+                   cle : Optional[bytes],tdc: Optional[bytes], 
+                   infos_sup: Optional[bytes]):
+    """
+    Envoie un message vers une addresse ip et un port bien précis
+    l'ecouteur s'excecutera indéfiniment dans un thread pour s'assurer que le méssage
+    à bien été recu et informe ce péripherique de la situation des paquets
+    envoyés
+
+    On utilisera l'ecouteur pour recevoir les ACKs et les NACKS
+    """
+
+    ip, port = sock_destination.getsockname()
+
+    def suivre(situation: bytearray):
+        """écoute sur les acks et les nacks envoyés par le port destinataire
+        """
+        while True:
+            pack = sock_destination.recv(2048)
+            if len(pack)==6:#Un ACK
+                situation = pack
+    
+
+            
+        
     
 

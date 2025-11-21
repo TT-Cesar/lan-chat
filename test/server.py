@@ -54,7 +54,7 @@ def start_server(server_ip='', server_port=0):
 
 
 def start_chat(client_socket: socket):
-    """Chat logic, must match clietnt chat logic to work properly"""
+    """Chat logic, must match client chat logic to work properly"""
     client_message = client_socket.recv(1024).decode()
     print(f"Client: {client_message}")
     server_message = input("Message for client: ")
