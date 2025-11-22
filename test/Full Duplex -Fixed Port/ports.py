@@ -1,7 +1,8 @@
 import socket
 import secrets
 import paquets
-
+import threading
+import queue
 from typing import Callable, List,Optional
 
 # Nombre premier sécurisé de 2048 bits (RFC 3526)
@@ -14,13 +15,13 @@ g = 2  # Générateur
 
 # Soit 301 adresses :
 base = "239.192.{}"
-adresses = []
+adresses_multicast = []
 
 for troisieme_octet in range(1, 3):  # 1 et 2
     for quatrieme_octet in range(1, 256):
-        if len(adresses) >= 301:
+        if len(adresses_multicast) >= 301:
             break
-        adresses.append(base.format(f"{troisieme_octet}.{quatrieme_octet}"))
+        adresses_multicast.append(base.format(f"{troisieme_octet}.{quatrieme_octet}"))
 
 # Décommentez pour voir le résultat
 # print(adresses)
@@ -46,7 +47,7 @@ class Utilisateur:
         if cle_publique != None:
             self.cle_publique = cle_publique
     
-class Appareil:
+class Appareil: # Représente un autre appareil sur le réseau
     def __init__(self, ip: str, port: int, ut: Utilisateur, octets_envoyes: List[bytes], octets_recus: List[bytes]):
         self.sock_recep = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(ip,port)
@@ -59,19 +60,58 @@ class Session:
         self.cet_appareil = sock_reception
         self.destinataire = destinataire
         if fdc != None and cle != None:
-            self.fonction_de_chiffrement = fdc
-            self.cle_de_chiffrement = cle
-        octets_envoyes = []
-        octets_recus = []
+            self.fdc = fdc
+            self.cle = cle
+        self.octets_envoyes = []
+        self.octets_recus = []
+        self.octets_a_envoyer = queue.Queue() # Octets prêts à être envoyés
+        self.octets_a_recevoir = queue.Queue() # Octets prêts à être reçus
         self.session_active = False
-        self.ACK_session = b'0x01'
-        self.ACK_entete = b'0x02'
-        self.NACK_entete = b'0x20'
-        self.ACK_paquet = b'0x03'
-        self.NACK_paquet = b'0x30'
-        
+        self.ACK_session = b'0x01' # Ici la taille du ACH c'est juste un octet
+        self.ACK_entete = b'0x02'   # Ici, la taille du ACK c'est aussi juste un octet
+        self.ACK_paquet = b'0x03'  # Ceci n'est que le debut du ACK d'un paquet. En réalité sa taille est de 6 octets(1 pour le code ACK + 5 pour l'ID du paquet)
+        self.NACK_paquet = b'0x30' # Même structure que le ACK d'un paquet, sera envoyé si un paquet n'est pas reçu correctement ou n'est pas récu après un certain temps(1 seconde ici)
     
+    def envoyer_octets(self, octets: bytes, fdc: Callable = NotImplemented, cle : bytes = None, tdc: bytes = b'\x00', infos_sup: bytes=b'\x00\x00\x00\x00'):
+        """Envoi des données au destinataire"""
+        paquets_a_envoyer = paquets.charger_octets(octets, fdc, cle, tdc, infos_sup)
+        for paquet in paquets_a_envoyer:
+            self.destinataire.sock.sendto(paquet, (self.destinataire.ip, self.destinataire.port))
+    
+    def recevoir_octets(self, paquets: List[bytes], fdd: Callable = NotImplemented, cle: bytes = None) -> bytes:
+        """Reçoit des paquets et reconstitue les octets d'origine
+    Args:
+        paquets: La liste de paquets reçus
+        fdd: La fonction de déchiffrement qui est AES dans ce projet
+        cle: La cle de déchiffrement
+    """
+    
+        entete = paquets[0]
+        entete_decharge = paquets.decharger_entete(entete if fdd == NotImplemented else fdd(entete, cle))
+        ndp = int.from_bytes(entete_decharge[0], 'big')
+        tddp = int.from_bytes(entete_decharge[1], 'big')
 
+        octets_recus = bytearray()
+
+        for i in range(1, ndp + 1):
+            paquet = paquets[i]
+            paquet_decharge = paquets.decharger_paquet(paquet if fdd == NotImplemented else fdd(paquet, cle))
+            id_paquet = int.from_bytes(paquet_decharge[0], 'big')
+            if id_paquet != i - 1:
+                raise ValueError(f"Paquet hors ordre: attendu {i-1}, reçu {id_paquet}")
+            octets_recus.extend(paquet_decharge[1])
+
+        return bytes(octets_recus[:(ndp - 1) * 1431 + tddp])
+    
+    def thread_envoi(self):
+        """Thread pour envoyer des octets en arrière-plan"""
+        while True:
+            try:
+                octets = self.octets_a_envoyer.get(timeout=1)  # Attendre jusqu'à 1 seconde pour obtenir des octets
+                self.envoyer_octets(octets, self.fdc, self.cle)
+            except queue.Empty:
+                continue  # Pas d'octets à envoyer, continuer la boucle
+            
 
     def _echange_cle(self):
         """Utilise Diffie Hellman pour implementer l'echange de clés"""
@@ -140,7 +180,7 @@ class Session:
         
         # A ce stade, la session est établie
         self.session_active = True
-        if self.fonction_de_chiffrement != None and self.cle_de_chiffrement != None:
+        if self.fdc != None and self.cle != None:
             cle_secrete = self._echange_cle()
             # Initialiser le chiffrement avec cle_secrete
             # (Implémentation du chiffrement non incluse ici)
@@ -153,12 +193,12 @@ class Chats:
         self.ip = ip
         self.sessions = sessions
         self.etats_chaines = etats_chaines
-        self.socks_ecoute = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # Socket pour l'écoute des chaines multicast
+        self.socks_de_recherche = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # Socket pour l'écoute des chaines multicast
         self.socks_reception = [] # Sockets pour la reception des données des sessions actives
                                   # Le dernier socket de cette liste est toujours réservé pour la prochaine session créée.
         for port in ports_decoutes:
             try:
-                self.socks_ecoute.bind((ip,port))
+                self.socks_de_recherche.bind((ip,port))
                 break
             except OSError:
                 if port == ports_decoutes[-1]:
@@ -167,6 +207,10 @@ class Chats:
                     print (f"Le port {port} est déjà utilisé, essayant le suivant...")
                     continue
         
+        # Après avoir créé le sock de recherche, on le fait rejoindre les groupes multicast
+        for adresse in adresses_multicast:
+            mreq = socket.inet_aton(adresse) + socket.inet_aton(ip)
+            self.socks_de_recherche.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     
     def ajouter_port_libre(self):
         """
@@ -179,7 +223,7 @@ class Chats:
         
 
 
-    def verifier_chaines():
+    def actualiser_etat_chaines():
         """
         Vérifie les chaines multicast pour savoir
         les utilisateurs actifs sur le réseau.
@@ -187,7 +231,19 @@ class Chats:
         Sera appelé en boucle toutes les x secondes si la
         detection passive est activée et à la création du chat.
         Pourra aussi être activé manuellement par l'utilisateur.
+
+        Structure d'un message de chaine multicast :
+        [Nom(s): 200 octets] [Prénom(s):[Nom(s): 200 octets] [Prénom 200 octets] [taille de la clé publique: 2 octets] [Clé publique: 1024 octets] [infos sup: 44 octets] Total: 1470 octets
+
+        Chaque chaine attendra 250ms apres chaque envoi de son statut
+
         """
+
+        
+
+
+
+        
 
 
 
