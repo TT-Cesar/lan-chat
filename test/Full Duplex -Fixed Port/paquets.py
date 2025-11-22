@@ -153,7 +153,36 @@ def decharger_entete(entete: bytes):
         raise CRCError("CRC invalide, paquet corrompu")
     else:
         return sectionner(entete,[0,5,7,8,12,16])
+
+def decharger_octets(paquets: list[bytes], fdd: Callable = NotImplemented, cle: bytes = None):
+    """
+    Recupere une liste de paquets et retourne la séquence d'octets
+    complète si tous les paquets sont intègres et dans le bon ordre.
+    Utilise le CRC-32 pour vérifier l'intégrité des paquets.
+
+    Args:
+        paquets: La liste de paquets reçus
+        fdd: La fonction de déchiffrement qui est AES dans ce projet
+        cle: La cle de déchiffrement
+    """
     
+    entete = paquets[0]
+    entete_decharge = decharger_entete(entete if fdd == NotImplemented else fdd(entete, cle))
+    ndp = int.from_bytes(entete_decharge[0], 'big')
+    tddp = int.from_bytes(entete_decharge[1], 'big')
+
+    octets_recus = bytearray()
+
+    for i in range(1, ndp + 1):
+        paquet = paquets[i]
+        paquet_decharge = decharger_paquet(paquet if fdd == NotImplemented else fdd(paquet, cle))
+        id_paquet = int.from_bytes(paquet_decharge[0], 'big')
+        if id_paquet != i - 1:
+            raise ValueError(f"Paquet hors ordre: attendu {i-1}, reçu {id_paquet}")
+        octets_recus.extend(paquet_decharge[1])
+
+    return bytes(octets_recus[:(ndp - 1) * 1431 + tddp])
+
 class TimeOutExeption(Exception):
     """Le temps imparti est épuisé"""
     pass
