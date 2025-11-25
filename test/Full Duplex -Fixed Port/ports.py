@@ -321,26 +321,42 @@ class Session:
 
 class Chats:
     """
-    Gestion des sessions multiples, découverte multicast par défaut,
-    appropriation d'une chaîne multicast, création de sessions via code
-    ou via découverte.
+    Gestion des sessions, découverte multicast, appropriation de chaîne, et création
+    de sessions directes via les informations publiées dans `infos_sup` (IP:4 octets + PORT:2 octets).
+    - Filtre les annonces multicast avec CRC valide uniquement.
+    - Stocke pour chaque entrée de contenu_chaines un dictionnaire:
+        { 'payload': bytes, 'ip': str, 'port': int, 'parsed': dict, 'last_seen': float }
+    - Evite les sessions dupliquées en comparant la cle_publique si disponible.
+    - Heuristique IP locale : priorise 192.168.x.x, puis 10.x.x.x, puis 172.16-31.x.x, sinon fallback.
     """
 
-    def __init__(self, ip: str, multicast_active: bool = True, include_code_in_hello: bool = True):
-        self.ip = ip
+    # Constantes attendues (doivent exister dans le module global)
+    # - adresses_multicast  (liste)
+    # - MULTICAST_PORT
+    # - MULTICAST_MSG_SIZE
+    # - NOMS_SIZE, PRENOMS_SIZE, TAILLE_CLE_SIZE, CLE_PUB_MAX, INFOS_SUP_SIZE, CRC_SIZE
+    # - SESSION_REQUEST, SESSION_ACK
+    # - ports_decoutes
+    # - paquets (module fourni)
+    # - Appareil, Utilisateur, Session (classes définies dans le même module)
+
+    def __init__(self, ip: Optional[str] = None, multicast_active: bool = True):
+        # Choix de l'IP local selon heuristique D si non fourni
+        self.ip = ip if ip is not None else self._choose_local_ip()
         self.sessions: List[Session] = []
+        # Chaque élément de contenu_chaines est soit None soit dict {'payload', 'ip', 'port', 'parsed', 'last_seen'}
+        self.contenu_chaines: List[Optional[dict]] = [None] * len(adresses_multicast)
         self.chaine_multicast: Optional[str] = None
         self.code_connexion: Optional[str] = None
-        self.contenu_chaines: List[Optional[bytes]] = [None] * len(adresses_multicast)
-        self.include_code_in_hello = include_code_in_hello
 
-        # Socket d'écoute des chaînes multicast (bind sur un des ports_decoutes)
+        # Socket de recherche multicast : on bind sur 0.0.0.0 pour compat Windows/Linux
         self.sock_de_recherche = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock_de_recherche.settimeout(0.1)
+        self.sock_de_recherche.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # En Windows, bind sur ('', port) ou ('0.0.0.0', port) ; on essaie la liste ports_decoutes
         bound = False
         for p in ports_decoutes:
             try:
-                self.sock_de_recherche.bind((self.ip, p))
+                self.sock_de_recherche.bind(('0.0.0.0', p))
                 bound = True
                 break
             except OSError:
@@ -348,76 +364,308 @@ class Chats:
         if not bound:
             raise OSError("Aucun port d'écoute disponible parmi ports_decoutes")
 
-        # Rejoindre les groupes multicast
+        # Tenter d'adhérer aux groupes multicast (peut échouer selon l'OS)
         try:
             for adresse in adresses_multicast:
                 mreq = socket.inet_aton(adresse) + socket.inet_aton(self.ip)
                 self.sock_de_recherche.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         except Exception:
-            # Si l'OS n'autorise pas l'ajout massif, on ignore et on continuera à écouter certaines adresses.
+            # Si l'ajout massif échoue, on poursuit quand même l'écoute sur la socket.
             pass
 
-        # Thread d'actualisation des chaînes (détection passive) : actif par défaut
+        # Threads de monitoring / incoming
         self._stop_mon = False
         if multicast_active:
             self._monitor_thread = threading.Thread(target=self.actualiser_contenu_chaines, daemon=True)
             self._monitor_thread.start()
 
-        # Thread d'écoute des demandes de session (handshake passif)
-        self._incoming_thread = threading.Thread(target=self._incoming_listener, daemon=True)
+        self._incoming_thread = threading.Thread(target=self.ecouter_demandes_session, daemon=True)
         self._incoming_thread.start()
 
-    # -------------------------
-    # Multicast : écoute / appropriation / publication
-    # -------------------------
+    # ---------------------------
+    # Heuristique D : choisir IP locale
+    # ---------------------------
+    def _choose_local_ip(self) -> str:
+        """
+        Heuristique D :
+          - priorise adresses 192.168.x.x
+          - sinon 10.x.x.x
+          - sinon 172.16–172.31.x.x
+          - sinon tente la méthode connect(("8.8.8.8",80))
+          - sinon '127.0.0.1' comme fallback
+        """
+        candidates = []
+        try:
+            import netifaces
+            for iface in netifaces.interfaces():
+                addrs = netifaces.ifaddresses(iface).get(netifaces.AF_INET, [])
+                for a in addrs:
+                    ip = a.get('addr')
+                    if ip and not ip.startswith('127.'):
+                        candidates.append(ip)
+        except Exception:
+            # netifaces non disponible : essayer connect hack
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                s.close()
+                if ip:
+                    candidates.append(ip)
+            except Exception:
+                pass
+
+        # Priorités
+        for ip in candidates:
+            if ip.startswith("192.168."):
+                return ip
+        for ip in candidates:
+            if ip.startswith("10."):
+                return ip
+        for ip in candidates:
+            parts = ip.split('.')
+            if len(parts) == 4:
+                first = int(parts[0])
+                second = int(parts[1])
+                if first == 172 and 16 <= second <= 31:
+                    return ip
+        # fallback
+        return candidates[0] if candidates else "127.0.0.1"
+
+    # ---------------------------
+    # Parsing / validation des paquets multicast
+    # ---------------------------
+    def _parse_multicast_payload(self, payload: bytes) -> Optional[dict]:
+        """
+        Parse et valide un payload de 1470 octets.
+        Vérifie CRC et renvoie un dict parsed :
+          {'noms','prenoms','taille_cle','cle_pub','infos_sup'}
+        Retourne None si invalide.
+        """
+        # Vérification de taille brute
+        if not payload or len(payload) != MULTICAST_MSG_SIZE:
+            return None
+        try:
+            # séparer le pack et le CRC final
+            pack = payload[:-CRC_SIZE]  # tout sauf CRC
+            crc_recv = payload[-CRC_SIZE:]
+            import binascii as _b
+            crc_calc = _b.crc32(pack).to_bytes(4, 'big')
+            if crc_calc != crc_recv:
+                # CRC invalide : rejeter
+                return None
+            i = 0
+            noms = pack[i:i+NOMS_SIZE].rstrip(b'\x00'); i += NOMS_SIZE
+            prenoms = pack[i:i+PRENOMS_SIZE].rstrip(b'\x00'); i += PRENOMS_SIZE
+            taille_cle = int.from_bytes(pack[i:i+TAILLE_CLE_SIZE], 'big'); i += TAILLE_CLE_SIZE
+            cle_pub = None
+            if taille_cle > 0:
+                cle_pub = pack[i:i+CLE_PUB_MAX][:taille_cle]
+            i += CLE_PUB_MAX
+            infos_sup = pack[i:i+INFOS_SUP_SIZE]; i += INFOS_SUP_SIZE
+            return {
+                'noms': noms.decode(errors='ignore') if noms else "",
+                'prenoms': prenoms.decode(errors='ignore') if prenoms else "",
+                'taille_cle': taille_cle,
+                'cle_pub': cle_pub,
+                'infos_sup': infos_sup
+            }
+        except Exception:
+            return None
+
+    # ---------------------------
+    # actualiser_contenu_chaines : thread de surveillance multicast
+    # ---------------------------
     def actualiser_contenu_chaines(self):
         """
-        Écoute en permanence les chaînes multicast et met à jour self.contenu_chaines.
-        Le message attendu a exactement MULTICAST_MSG_SIZE octets (1470).
+        Boucle d'écoute sur self.sock_de_recherche. Stocke uniquement les annonces
+        ayant une CRC valide (via _parse_multicast_payload). Pour chaque réception,
+        stocke payload + ip_source + port_source + parsed + last_seen.
         """
+        self.sock_de_recherche.settimeout(0.1)
         while not self._stop_mon:
             try:
-                data, (ip_src, port_src) = self.sock_de_recherche.recvfrom(SOCKET_RECV_BUFFER)
-                # On ne force pas l'analyse complète ici : on stocke la payload brute
-                # L'interface ou une fonction dédiée pourra parser ce format (taille clé, etc.)
-                # On met à jour la première chaîne disponible correspondante si possible
-                # Pour simplicité, on stocke l'info à l'indice correspondant si on peut trouver une adresse connue
-                # Ici on ne fait pas mapping IP->indice ; on stocke les messages en FIFO (remplissage simple)
-                # plus tard tu peux fournir une méthode de parsing et mapping précis.
-                # Parcours pour stocker dans le premier None
+                data, (ip_src, port_src) = self.sock_de_recherche.recvfrom(4096)
+                parsed = self._parse_multicast_payload(data)
+                if parsed is None:
+                    # CRC invalide ou format incorrect : ignorer
+                    continue
+                # infos_sup contient au moins 6 octets : IP(4) + PORT(2)
+                infos = parsed.get('infos_sup', b'\x00' * INFOS_SUP_SIZE)
+                try:
+                    ip_bytes = infos[0:4]
+                    port_bytes = infos[4:6]
+                    ip_from_infos = socket.inet_ntoa(ip_bytes)
+                    port_from_infos = int.from_bytes(port_bytes, 'big')
+                except Exception:
+                    # Si infos_sup mal formée, on utilise ip_src/port_src comme fallback
+                    ip_from_infos = ip_src
+                    port_from_infos = port_src
+
+                # trouver un slot libre ou mise à jour d'un existant (match par cle_pub si possible)
+                now = time.time()
                 stored = False
-                for i in range(len(self.contenu_chaines)):
-                    if self.contenu_chaines[i] is None:
-                        self.contenu_chaines[i] = data
-                        stored = True
-                        break
+                # si le message contient une clé publique connue, essayer de mettre à jour sa position existante
+                cle_pub = parsed.get('cle_pub')
+                if cle_pub:
+                    for i, entry in enumerate(self.contenu_chaines):
+                        if entry and entry.get('parsed') and entry['parsed'].get('cle_pub') == cle_pub:
+                            # mise à jour de l'entrée
+                            self.contenu_chaines[i] = {
+                                'payload': data,
+                                'ip': ip_from_infos,
+                                'port': port_from_infos,
+                                'parsed': parsed,
+                                'last_seen': now
+                            }
+                            stored = True
+                            break
+
                 if not stored:
-                    # écrase la plus vieille
-                    self.contenu_chaines[0] = data
+                    # stocker dans le premier None ou écraser la plus vieille
+                    for i in range(len(self.contenu_chaines)):
+                        if self.contenu_chaines[i] is None:
+                            self.contenu_chaines[i] = {
+                                'payload': data,
+                                'ip': ip_from_infos,
+                                'port': port_from_infos,
+                                'parsed': parsed,
+                                'last_seen': now
+                            }
+                            stored = True
+                            break
+                    if not stored:
+                        # écraser la plus vieille
+                        oldest = 0
+                        oldest_time = self.contenu_chaines[0]['last_seen'] if self.contenu_chaines[0] else now
+                        for j in range(1, len(self.contenu_chaines)):
+                            if self.contenu_chaines[j] and self.contenu_chaines[j]['last_seen'] < oldest_time:
+                                oldest = j
+                                oldest_time = self.contenu_chaines[j]['last_seen']
+                        self.contenu_chaines[oldest] = {
+                            'payload': data,
+                            'ip': ip_from_infos,
+                            'port': port_from_infos,
+                            'parsed': parsed,
+                            'last_seen': now
+                        }
             except socket.timeout:
                 continue
             except Exception:
+                # ignorer erreurs ponctuelles
                 continue
 
-    def _is_chain_quiet(self, adresse_multicast: str, duree: float) -> bool:
+    # ---------------------------
+    # Construire payload multicast (utilisé si on publie notre propre annonce)
+    # ---------------------------
+    def _build_multicast_payload(self, noms: bytes = None, prenoms: bytes = None,
+                                 cle_pub: Optional[bytes] = None, port_reception: Optional[int] = None) -> bytes:
         """
-        Vérifie si une adresse multicast reçoit du trafic pendant `duree` secondes.
-        On crée un socket temporaire pour écouter sur cette adresse. Si aucun paquet
-        n'est reçu pendant `duree`, la chaîne est considérée "libre".
+        Construire le message 1470 octets :
+        [NOMS:200][PRENOMS:200][TAILLE_CLE:2][CLE_PUB:1024][INFOS_SUP:40][CRC:4]
+        infos_sup[0:4]=IP (self.ip), [4:6]=port_reception
+        """
+        noms_b = (noms or b"")[:NOMS_SIZE].ljust(NOMS_SIZE, b'\x00')
+        prenoms_b = (prenoms or b"")[:PRENOMS_SIZE].ljust(PRENOMS_SIZE, b'\x00')
+        if cle_pub:
+            taille = len(cle_pub)
+            if taille > CLE_PUB_MAX:
+                cle_pub = cle_pub[:CLE_PUB_MAX]
+                taille = CLE_PUB_MAX
+            taille_field = taille.to_bytes(TAILLE_CLE_SIZE, 'big')
+            cle_field = cle_pub.ljust(CLE_PUB_MAX, b'\x00')
+        else:
+            taille_field = (0).to_bytes(TAILLE_CLE_SIZE, 'big')
+            cle_field = b'\x00' * CLE_PUB_MAX
+
+        # infos_sup : IP (4) + PORT (2) + padding 34
+        try:
+            ip_bytes = socket.inet_aton(self.ip)
+        except Exception:
+            ip_bytes = b'\x00\x00\x00\x00'
+        port_field = (port_reception if port_reception is not None else 0).to_bytes(2, 'big')
+        infos = ip_bytes + port_field + (b'\x00' * (INFOS_SUP_SIZE - 6))
+
+        pack = noms_b + prenoms_b + taille_field + cle_field + infos
+        # CRC final
+        try:
+            import binascii as _b
+            crc4 = _b.crc32(pack).to_bytes(4, 'big')
+        except Exception:
+            crc4 = b'\x00' * 4
+        return pack + crc4
+
+    # ---------------------------
+    # Publier une annonce unique sur une adresse multicast donnée
+    # ---------------------------
+    def publier_message_sur_chaine_onadresse(self, adresse: str, noms: bytes = None, prenoms: bytes = None,
+                                             cle_pub: Optional[bytes] = None, port_reception: Optional[int] = None):
+        """
+        Envoie une seule annonce sur `adresse` en utilisant self._build_multicast_payload.
+        """
+        payload = self._build_multicast_payload(noms, prenoms, cle_pub, port_reception)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            ttl = 1
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
+            except Exception:
+                pass
+            sock.sendto(payload, (adresse, MULTICAST_PORT))
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    # ---------------------------
+    # Trouver/approprier une chaîne multicast libre (procédure d'appropriation)
+    # ---------------------------
+    def trouver_chaine_multicast(self, noms: bytes = None, prenoms: bytes = None,
+                                 cle_pub: Optional[bytes] = None, port_reception: Optional[int] = None,
+                                 listen_interval: float = 0.12, attempts: int = 2, backoff_max: float = 0.08) -> Optional[str]:
+        """
+        Tente d'approprier une chaîne multicast libre et démarre un broadcast périodique si réussi.
+        Renvoie l'adresse multicast choisie ou None.
+        """
+        for adresse in adresses_multicast:
+            # test silence rapide
+            if not self._is_chain_quiet(adresse, listen_interval):
+                continue
+            # tentative d'appropriation
+            for attempt in range(attempts):
+                # envoyer annonce unique
+                self.publier_message_sur_chaine_onadresse(adresse, noms, prenoms, cle_pub, port_reception)
+                # courte écoute pour détecter collision
+                time.sleep(listen_interval / 2.0)
+                if self._is_chain_quiet(adresse, listen_interval / 2.0):
+                    # adopt
+                    self.chaine_multicast = adresse
+                    # lancer broadcast permanent
+                    t = threading.Thread(target=self._broadcast_loop, args=(adresse, noms, prenoms, cle_pub, port_reception), daemon=True)
+                    t.start()
+                    return adresse
+                else:
+                    time.sleep(random.random() * backoff_max)
+                    continue
+        return None
+
+    def _is_chain_quiet(self, adresse: str, duree: float) -> bool:
+        """
+        Vérifie si une adresse multicast est silencieuse pendant `duree` secondes.
+        Créé un socket temporaire et rejoint le groupe.
         """
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(duree)
         try:
-            s.settimeout(duree)
-            # join that multicast on local interface
             try:
-                mreq = socket.inet_aton(adresse_multicast) + socket.inet_aton(self.ip)
+                mreq = socket.inet_aton(adresse) + socket.inet_aton(self.ip)
                 s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
             except Exception:
-                # si échec, on continue mais on ne peut garantir la détection fine
                 pass
             try:
                 s.recvfrom(1024)
-                return False  # trafic détecté
+                return False
             except socket.timeout:
                 return True
         finally:
@@ -426,246 +674,210 @@ class Chats:
             except Exception:
                 pass
 
-    def trouver_chaine_multicast(self) -> Optional[str]:
+    def _broadcast_loop(self, adresse: str, noms: bytes = None, prenoms: bytes = None,
+                        cle_pub: Optional[bytes] = None, port_reception: Optional[int] = None):
         """
-        Tente d'approprier une chaîne multicast libre.
-        Procédure :
-          - parcours des adresses multicast
-          - pour chaque candidate, vérifier si la chaîne est silencieuse (durée courte)
-          - si silencieuse : envoyer sur la chaîne ses informations (message format 1470)
-          - écouter un intervalle plus court ; si on voit un autre message => collision
-          - si pas de collision : on prend la chaîne
-          - backoff aléatoire (<= BACKOFF_MAX) si collision, refaire jusqu'à APPROPRIATION_ATTEMPTS
-        Retourne l'adresse multicast choisie ou None si échec.
-        """
-        for adresse in adresses_multicast:
-            # test silence initial
-            try:
-                quiet = self._is_chain_quiet(adresse, MULTICAST_LISTEN_INTERVAL)
-            except Exception:
-                quiet = False
-            if not quiet:
-                continue
-
-            # tentative d'appropriation (max 2 essais)
-            for attempt in range(APPROPRIATION_ATTEMPTS):
-                # envoyer nos infos sur la chaîne (payload construit par publier_message_sur_chaine)
-                try:
-                    self.publier_message_sur_chaine_onadresse(adresse)
-                except Exception:
-                    pass
-
-                # écouter une très courte période pour détecter collision
-                time.sleep(MULTICAST_LISTEN_INTERVAL / 2.0)
-                # si on détecte un message issu d'un autre hôte -> collision
-                # Pour simplifier : on ré-appellera _is_chain_quiet et si pas quiet -> collision
-                try:
-                    still_quiet = self._is_chain_quiet(adresse, MULTICAST_LISTEN_INTERVAL / 2.0)
-                except Exception:
-                    still_quiet = False
-
-                if still_quiet:
-                    # chaîne adoptée
-                    self.chaine_multicast = adresse
-                    # démarrer broadcast périodique
-                    t = threading.Thread(target=self._broadcast_loop, args=(adresse,), daemon=True)
-                    t.start()
-                    return adresse
-                else:
-                    # collision : backoff aléatoire < BACKOFF_MAX puis retenter
-                    backoff = random.random() * BACKOFF_MAX
-                    time.sleep(backoff)
-                    continue
-        # aucune chaîne disponible
-        return None
-
-    def _broadcast_loop(self, adresse: str):
-        """
-        Envoi régulier (ANNOUNCE_INTERVAL) de l'annonce sur la chaîne que l'on possède.
-        Le message respecte la structure 1470 octets.
+        Envoi périodique d'annonces sur la chaîne appropriée.
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        ttl = 1
         try:
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
-        except Exception:
-            pass
-        while self.chaine_multicast == adresse:
             try:
-                payload = self._build_multicast_payload()
-                sock.sendto(payload, (adresse, MULTICAST_PORT))
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
             except Exception:
                 pass
-            time.sleep(ANNOUNCE_INTERVAL)
-        try:
-            sock.close()
-        except Exception:
-            pass
-
-    def _build_multicast_payload(self) -> bytes:
-        """
-        Construit exactement le message multicast de 1470 octets :
-        [Noms:200][Prenoms:200][taille_cle:2][cle_pub:1024][infos_sup:40][CRC:4]
-        - Si la clé publique n'est pas fournie (taille=0), on place 0 dans les 2 octets,
-          et on peut laisser 1024 octets de padding (zéros) après.
-        - Les 40 octets infos_sup sont laissés vides pour l'instant.
-        - CRC calculé sur tout sauf le champ CRC final (dernier 4 octets).
-        """
-        # Récupérer info locale (si on a une session / utilisateur local)
-        # Ici on ne connaît pas directement l'utilisateur local : c'est géré par l'application.
-        # Pour compatibilité, on place des champs vides par défaut. L'UI / application pourra
-        # surcharger cette méthode si nécessaire.
-        noms = b"\x00" * NOMS_SIZE
-        prenoms = b"\x00" * PRENOMS_SIZE
-        taille_cle = (0).to_bytes(2, 'big')
-        cle_pub = b"\x00" * CLE_PUB_MAX
-        infos = b"\x00" * INFOS_SUP_SIZE
-        pack = noms + prenoms + taille_cle + cle_pub + infos
-        crc = paquets.__dict__.get('binascii', None)
-        # calc CRC en utilisant binascii.crc32 si disponible
-        try:
-            import binascii as _b
-            crc4 = _b.crc32(pack).to_bytes(4, 'big')
-        except Exception:
-            crc4 = b"\x00" * 4
-        return pack + crc4
-
-    def publier_message_sur_chaine_onadresse(self, adresse: str):
-        """
-        Envoie le message d'annonce sur `adresse` une seule fois.
-        Utilise la même construction que _build_multicast_payload.
-        """
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            payload = self._build_multicast_payload()
-            sock.sendto(payload, (adresse, MULTICAST_PORT))
+            while self.chaine_multicast == adresse:
+                payload = self._build_multicast_payload(noms, prenoms, cle_pub, port_reception)
+                try:
+                    sock.sendto(payload, (adresse, MULTICAST_PORT))
+                except Exception:
+                    pass
+                time.sleep(ANNOUNCE_INTERVAL)
         finally:
             try:
                 sock.close()
             except Exception:
                 pass
 
-    # -------------------------
-    # Création de session par code (active)
-    # -------------------------
-    def creer_session_par_code(self, code: str, fdc: Optional[Callable] = None, cle: Optional[bytes] = None,
-                               require_discovery: bool = False, retry: int = 3, timeout: float = 0.5):
+    # ---------------------------
+    # Création de session directe depuis un index de detection multicast
+    # ---------------------------
+    def creer_session_par_multicast(self, index: int, fdc: Optional[Callable] = None, cle: Optional[bytes] = None,
+                                    timeout: float = 0.5, retry: int = 3) -> Session:
         """
-        Décode le code -> (ip, port), effectue handshake (SESSION_REQUEST -> SESSION_ACK),
-        crée une Session liée à une socket locale nouvellement bindée (port réservé),
-        assigne les callbacks d'authentification à la session (si désiré), puis appelle
-        session.creer_session() pour faire DH + auth (selon callbacks).
+        Récupère l'entrée contenu_chaines[index], extrait ip/port (depuis infos_sup),
+        vérifie qu'on n'a pas déjà une session avec cette cle_publique (si disponible),
+        prépare un socket local (bind '0.0.0.0',0), envoie SESSION_REQUEST, attend SESSION_ACK,
+        puis crée la Session et l'ajoute à self.sessions.
         """
-        ip_dest, port_dest = decode_connexion_code(code)
+        if index < 0 or index >= len(self.contenu_chaines):
+            raise IndexError("Index hors plage pour contenu_chaines")
+        entry = self.contenu_chaines[index]
+        if not entry:
+            raise ValueError("Aucune annonce à cet index")
+        parsed = entry.get('parsed')
+        ip_target = entry.get('ip') or None
+        port_target = entry.get('port') or None
+        if not ip_target or not port_target:
+            # fallback try to read infos_sup raw
+            if parsed:
+                infos = parsed.get('infos_sup', b'\x00'*INFOS_SUP_SIZE)
+                try:
+                    ip_target = socket.inet_ntoa(infos[0:4])
+                    port_target = int.from_bytes(infos[4:6], 'big')
+                except Exception:
+                    raise ConnectionError("Impossible de déterminer IP/port du pair depuis l'annonce")
+        # éviter duplication : si on a une clé publique pour ce pair, vérifier s'il existe déjà une session
+        cle_pub_peer = parsed.get('cle_pub') if parsed else None
+        if cle_pub_peer:
+            for s in self.sessions:
+                try:
+                    peer_cle = s.destinataire.ut.cle_publique
+                    if peer_cle and peer_cle == cle_pub_peer:
+                        raise ConnectionError("Session déjà existante avec ce pair (clé publique identique)")
+                except Exception:
+                    continue
 
-        # Préparer socket local (port attribué dynamiquement par OS)
+        # préparer socket local bindé sur 0.0.0.0:0 (compatible Windows)
         sock_local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock_local.bind((self.ip, 0))
+        sock_local.bind(('0.0.0.0', 0))
+        sock_local.settimeout(timeout)
         local_port = sock_local.getsockname()[1]
 
-        # Envoi SESSION_REQUEST et attente SESSION_ACK (retry)
-        sock_local.settimeout(timeout)
+        # Envoi SESSION_REQUEST + indique le port local où on souhaite recevoir (2-octets)
+        request_payload = SESSION_REQUEST + local_port.to_bytes(2, 'big')
+        success = False
         for attempt in range(retry):
             try:
-                sock_local.sendto(SESSION_REQUEST, (ip_dest, port_dest))
+                sock_local.sendto(request_payload, (ip_target, port_target))
                 data, _ = sock_local.recvfrom(64)
+                # accepter uniquement un ACK strict
                 if data == SESSION_ACK:
-                    # handshake réussi
+                    success = True
                     break
-            except socket.timeout:
-                continue
-        else:
-            sock_local.close()
-            raise ConnectionError("Pas de réponse à SESSION_REQUEST")
-
-        # Création Appareil + Session
-        # Utilisateur temporaire (Inconnu) : l'application doit mettre à jour après auth
-        utilisateur_temp = Utilisateur(["Inconnu"], ["Inconnu"], cle_privee=None, cle_publique=None)
-        appareil = Appareil(ip_dest, port_dest, utilisateur_temp)
-        session = Session(sock_local, appareil, fdc, cle)
-
-        # Assignation des callbacks d'authentification (par défaut None)
-        # L'application qui utilise Chats peut attribuer ici des callbacks spécifiques.
-        # Exemple (à faire côté applicatif) :
-        # session.demander_preuve = some_callable
-        # session.fournir_preuve = some_callable2
-        # session.confirmer_preuve = some_callable3
-
-        # Démarrer la session (DH + auth via callbacks si fournis)
-        session.creer_session(initiateur=True)
-        self.sessions.append(session)
-        return session
-
-    # -------------------------
-    # Incoming listener : réponse passive à SESSION_REQUEST
-    # -------------------------
-    def _incoming_listener(self):
-        """
-        Écoute en permanence les SESSION_REQUEST entrants sur sock_de_recherche.
-        Lorsqu'une demande est reçue, on envoie SESSION_ACK, puis on crée une session
-        associée et on lance session.creer_session() en mode passif.
-        """
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.bind((self.ip, 0))  # socket arbitraire pour réponse
-        except Exception:
-            s = self.sock_de_recherche
-        s.settimeout(0.5)
-        while True:
-            try:
-                data, (ip_src, port_src) = self.sock_de_recherche.recvfrom(1024)
-                if data == SESSION_REQUEST:
-                    # envoyer ACK
-                    try:
-                        s.sendto(SESSION_ACK, (ip_src, port_src))
-                    except Exception:
-                        pass
-
-                    # Préparer socket local pour la session (nouveau port)
-                    sock_local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    sock_local.bind((self.ip, 0))
-                    # créer Appareil & Session
-                    utilisateur_temp = Utilisateur(["Inconnu"], ["Inconnu"], cle_privee=None, cle_publique=None)
-                    appareil = Appareil(ip_src, port_src, utilisateur_temp)
-                    session = Session(sock_local, appareil)
-                    # callbacks laissés None par défaut ; l'application peut les assigner
-                    # lancer la procédure de création (passive)
-                    session.creer_session(initiateur=False)
-                    self.sessions.append(session)
             except socket.timeout:
                 continue
             except Exception:
                 continue
 
-    # -------------------------
-    # Gestion codes de connexion
-    # -------------------------
+        if not success:
+            sock_local.close()
+            raise ConnectionError("Pas de réponse à SESSION_REQUEST depuis le pair")
+
+        # réussi -> créer utilisateur temporaire et Session
+        utilisateur_temp = Utilisateur([parsed.get('noms') or "Inconnu"], [parsed.get('prenoms') or "Inconnu"],
+                                       cle_privee=None, cle_publique=cle_pub_peer)
+        appareil = Appareil(ip_target, port_target, utilisateur_temp)
+        session = Session(sock_local, appareil, fdc, cle)
+        # ajouter session à la liste
+        self.sessions.append(session)
+        return session
+
+    # ---------------------------
+    # Méthode utilitaire : generer code connexion
+    # ---------------------------
     def generer_code_connexion(self, port_libre: int) -> str:
-        """
-        Génère le code de connexion à partir de l'IP local et d'un port libre
-        (port_libre doit être un port réellement réservé par l'application).
-        """
         return encode_connexion_code(self.ip, port_libre)
 
-    # -------------------------
-    # Utilitaires
-    # -------------------------
+    # ---------------------------
+    # Liste des sessions actives
+    # ---------------------------
     def liste_sessions_actives(self) -> List[Session]:
         return [s for s in self.sessions if s.session_active]
 
+    # -------------------------------------------------------------------
+    # Écoute des demandes de session (P2P) depuis d'autres appareils
+    # -------------------------------------------------------------------
+    def ecouter_demandes_session(self):
+        """
+        Écoute en continu sur sock_de_recherche des demandes de session
+        envoyées par d'autres appareils.
+
+        FORMAT D'UNE DEMANDE SESSION_REQUEST :
+            [0]    = octet SESSION_REQUEST
+            [1:3]  = port_local_du_demandeur (2 octets big-endian)
+
+        ACTION :
+            - envoyer immédiatement SESSION_ACK au port fourni
+            - créer automatiquement une Session côté local si nécessaire
+        """
+        while not self._stop_mon:
+            try:
+                data, (ip_src, port_src) = self.sock_de_recherche.recvfrom(64)
+            except Exception:
+                time.sleep(0.05)
+                continue
+
+            if not data:
+                continue
+
+            # Vérifier qu'il s'agit d'une demande SESSION_REQUEST
+            if data[0:1] != SESSION_REQUEST:
+                continue
+
+            # Lire le port sur lequel le demandeur souhaite recevoir la réponse
+            try:
+                port_reception_demandeur = int.from_bytes(data[1:3], "big")
+            except:
+                continue
+
+            # 1) Répondre par SESSION_ACK
+            try:
+                self.sock_de_recherche.sendto(SESSION_ACK, (ip_src, port_reception_demandeur))
+            except:
+                continue
+
+            # 2) Créer la Session côté local (Alice)
+            # Vérifier si déjà existante (clé publique ou IP/Port)
+            # Cela dépend de ta logique d'unicité, mais on peut mettre:
+            existe = False
+            for s in self.sessions:
+                if s.destinataire.ip == ip_src:
+                    existe = True
+                    break
+
+            if existe:
+                continue  # session déjà existante
+
+            # Sinon créer la session passive
+            try:
+                # Préparation utilisateur temporaire (peut évoluer après authentification)
+                ut = Utilisateur(
+                    noms=["Inconnu"],
+                    prenoms=["Inconnu"],
+                    cle_publique=None,
+                    cle_privee=None
+                )
+
+                # L'appareil distant
+                appareil = Appareil(ip_src, port_src, ut)
+
+                # Socket local pour communication
+                sock_local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock_local.bind(("0.0.0.0", 0))
+
+                # Création Session
+                session = Session(sock_local, appareil, None, None)
+                session.session_active = True
+
+                self.sessions.append(session)
+
+            except Exception:
+                continue
+    # ---------------------------
+    # Fermeture et cleanup
+    # ---------------------------
     def close_all(self):
-        # ferme proprement toutes les sessions
+        self._stop_mon = True
+        try:
+            self.sock_de_recherche.close()
+        except Exception:
+            pass
         for s in list(self.sessions):
             try:
                 s.close()
             except Exception:
                 pass
-        try:
-            self.sock_de_recherche.close()
-        except Exception:
-            pass
-        self._stop_mon = True
-
+        self.sessions.clear()
 # -----------------------
 # FIN de ports.py
 # -----------------------
