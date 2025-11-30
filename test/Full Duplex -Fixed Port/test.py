@@ -25,9 +25,9 @@ def fdc_aes_interne(octets: bytes, cle: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 
 CURRENT_USER = Utilisateur(
-    noms=["Alice"],
+    noms=["Host"],
     prenoms=["Test"],
-    cle_publique=b"",     # 0 signifie pas d’auth obligatoire
+    cle_publique=b"",     # 0 signifie pas d'auth obligatoire
     cle_privee=None       # pas utilisé dans ce test
 )
 
@@ -47,11 +47,12 @@ RUNNING = True
 def print_menu():
     print("\n=== MENU ===")
     print("1. Voir les appareils détectés (CRC valides)")
-    print("2. Diffuser mes infos (multicast)")
+    print("2. Forcer appropriation d'une chaîne multicast")
     print("3. Se connecter via multicast (par index)")
     print("4. Voir les sessions actives")
     print("5. Entrer dans une session pour discuter")
-    print("6. Quitter")
+    print("6. Générer code de connexion")
+    print("7. Quitter")
     print("Choix: ", end="", flush=True)
 
 
@@ -61,6 +62,7 @@ def print_menu():
 
 def show_detected():
     print("\n=== Appareils détectés ===")
+    detected_count = 0
     for i, entry in enumerate(APP.contenu_chaines):
         if entry is None:
             continue
@@ -69,32 +71,43 @@ def show_detected():
         print(f"     IP   : {entry['ip']}")
         print(f"     Port : {entry['port']}")
         print(f"     Cle  : taille={p['taille_cle']} octets")
+        print(f"     Dernière vue : {time.time() - entry['last_seen']:.1f}s")
         print()
+        detected_count += 1
+    
+    if detected_count == 0:
+        print("Aucun appareil détecté.")
+        print("Assurez-vous que d'autres instances sont en cours d'exécution sur le même réseau.")
     print("=== FIN ===")
 
 
 # ---------------------------------------------------------------------------
-# Option 2 : Diffuser une annonce unique
+# Option 2 : Forcer l'appropriation d'une chaîne
 # ---------------------------------------------------------------------------
 
-def broadcast_once():
-    print("\nEnvoi d'une annonce unique sur TOUTES les chaînes…")
-    for addr in APP.contenu_chaines:
-        pass
-    # En réalité, on diffuse sur 1 chaîne choisie : test simple:
-    # Utilise l'adresse choisie dans APP.chaine_multicast, sinon fixe
-    adresse = APP.chaine_multicast or "239.192.1.1"
-    try:
-        APP.publier_message_sur_chaine_onadresse(
-            adresse,
-            noms="Alice".encode(),
-            prenoms="Test".encode(),
-            cle_pub=None,
-            port_reception=APP.sock_de_recherche.getsockname()[1],
-        )
-        print("Annonce envoyée.")
-    except Exception as e:
-        print("Erreur broadcast:", e)
+def force_multicast_appropriation():
+    print("\nForcer l'appropriation d'une chaîne multicast…")
+    
+    # Arrêter la diffusion actuelle si elle existe
+    old_chain = APP.chaine_multicast
+    APP.chaine_multicast = None
+    
+    # Trouver une nouvelle chaîne
+    chaine = APP.trouver_chaine_multicast(
+        noms=b"Host",
+        prenoms=b"Test", 
+        cle_pub=None,
+        port_reception=APP.port_p2p
+    )
+    
+    if chaine:
+        print(f"✅ Chaîne appropriée : {chaine}")
+        print(f"✅ Port P2P : {APP.port_p2p}")
+        if old_chain:
+            print(f"✅ Ancienne chaîne {old_chain} libérée")
+    else:
+        print("❌ Aucune chaîne libre trouvée")
+        APP.chaine_multicast = old_chain  # Restaurer l'ancienne
 
 
 # ---------------------------------------------------------------------------
@@ -107,15 +120,17 @@ def connect_from_detected():
     except:
         print("Index invalide.")
         return
+    
     try:
         session = APP.creer_session_par_multicast(
             index=index,
             fdc=fdc_aes_interne,
             cle=b"ma_cle_interne_test"
         )
-        print("Session créée avec succès.")
+        print("✅ Session créée avec succès.")
+        print(f"✅ Avec {session.destinataire.ip}:{session.destinataire.port}")
     except Exception as e:
-        print("ERREUR:", e)
+        print(f"❌ ERREUR: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +139,14 @@ def connect_from_detected():
 
 def show_sessions():
     print("\n=== Sessions actives ===")
-    for i, s in enumerate(APP.sessions):
-        print(f"[{i}] -> {s.destinataire.ip}:{s.destinataire.port}  actif={s.session_active}")
+    active_sessions = APP.liste_sessions_actives()
+    
+    if not active_sessions:
+        print("Aucune session active.")
+    else:
+        for i, s in enumerate(active_sessions):
+            status = "✅ Authentique" if s.authentique else "❌ Non authentique"
+            print(f"[{i}] {s.destinataire.ip}:{s.destinataire.port} - {status}")
     print("=== FIN ===")
 
 
@@ -140,87 +161,116 @@ def chat_in_session():
         print("Index invalide.")
         return
 
-    if idx < 0 or idx >= len(APP.sessions):
+    active_sessions = APP.liste_sessions_actives()
+    if idx < 0 or idx >= len(active_sessions):
         print("Aucune session à cet index.")
         return
 
-    sess = APP.sessions[idx]
+    sess = active_sessions[idx]
 
     print(f"\n=== Session avec {sess.destinataire.ip}:{sess.destinataire.port} ===")
     print("Tapez /exit pour revenir au menu.")
     print("----------------------------------------")
 
-    # Thread non bloquant pour réception interne
+    # Thread pour la réception des messages
     def receiver():
         while RUNNING and sess.session_active:
             try:
-                data, _ = sess.cet_appareil.recvfrom(4096)
-                # Décode les paquets (format paquets.py)
-                print("\n(Recep) Octets bruts reçus:", len(data))
-                print(">>> ", end="", flush=True)
-            except:
-                time.sleep(0.1)
+                data, addr = sess.cet_appareil.recvfrom(4096)
+                # Vérifier que le message vient du bon destinataire
+                if addr[0] == sess.destinataire.ip and addr[1] == sess.destinataire.port:
+                    try:
+                        # Essayer de déchiffrer et afficher le message
+                        message = data.decode('utf-8', errors='ignore')
+                        print(f"\n[Message reçu] {message}")
+                        print(">>> ", end="", flush=True)
+                    except Exception as e:
+                        print(f"\n[Données brutes reçues] {len(data)} octets")
+                        print(">>> ", end="", flush=True)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if RUNNING:  # Ne pas afficher l'erreur si on quitte normalement
+                    print(f"\nErreur réception: {e}")
+                break
 
+    # Configurer le timeout pour la réception
+    sess.cet_appareil.settimeout(0.5)
+    
+    # Démarrer le thread de réception
     t = threading.Thread(target=receiver, daemon=True)
     t.start()
 
-    # Boucle d’envoi
-    while True:
-        msg = input(">>> ")
+    # Boucle d'envoi
+    while RUNNING and sess.session_active:
+        try:
+            msg = input(">>> ")
+        except (EOFError, KeyboardInterrupt):
+            break
+            
         if msg == "/exit":
             print("Retour au menu.")
-            return
-        try:
-            sess.ajouter_message_a_envoyer(msg.encode())
-        except Exception as e:
-            print("Erreur envoi:", e)
+            break
+            
+        if msg.strip():  # Ne pas envoyer de message vide
+            try:
+                # Utiliser la file d'envoi de la session
+                sess.octets_a_envoyer.put(msg.encode('utf-8'))
+                print("[Message envoyé]")
+            except Exception as e:
+                print(f"Erreur envoi: {e}")
 
 
 # ---------------------------------------------------------------------------
-# MAIN LOOP
+# Option 6 : Générer code de connexion
 # ---------------------------------------------------------------------------
+
+def generate_connection_code():
+    try:
+        code = APP.generer_code_connexion()
+        print(f"\n=== Code de connexion ===")
+        print(f"Code : {code}")
+        print(f"IP : {APP.ip}")
+        print(f"Port P2P : {APP.port_p2p}")
+        print("Partagez ce code pour permettre la connexion directe.")
+        print("=== FIN ===")
+    except Exception as e:
+        print(f"❌ Erreur génération code: {e}")
+
+# In test.py
 
 def main():
-    global APP, RUNNING
+    global APP, RUNNING, CURRENT_USER
 
-    # Initialise la pile Chat
-    APP = Chats()
-
-    print("\nSystème démarré. Multicast actif. Recherche de pairs…")
-    time.sleep(1)
-
-    while RUNNING:
-        print_menu()
-        choice = input("").strip()
-
-        if choice == "1":
-            show_detected()
-
-        elif choice == "2":
-            broadcast_once()
-
-        elif choice == "3":
-            connect_from_detected()
-
-        elif choice == "4":
-            show_sessions()
-
-        elif choice == "5":
-            chat_in_session()
-
-        elif choice == "6":
-            print("Fermeture…")
-            RUNNING = False
-            break
-
-        else:
-            print("Choix invalide.")
+    # --- NEW: User Input for Name ---
+    print("\n=== CONFIGURATION ===")
+    my_name = input("Entrez votre nom (ex: Host): ").strip()
+    if not my_name: my_name = "Host"
+    my_surname = input("Entrez votre prenom (ex: Test): ").strip()
+    if not my_surname: my_surname = "Test"
+    
+    CURRENT_USER = Utilisateur(
+        noms=[my_name],
+        prenoms=[my_surname],
+        cle_publique=b"",
+        cle_privee=None
+    )
+    # --------------------------------
 
     try:
-        APP.close_all()
-    except:
-        pass
+        # Pass CURRENT_USER to Chats so it uses the right name in multicast
+        APP = Chats(multicast_active=True)
+        
+        print("\n✅ Système démarré avec succès!")
+        print(f"✅ Identité: {my_name} {my_surname}")
+        print(f"✅ IP locale: {APP.ip}")
+        print(f"✅ Port P2P: {APP.port_p2p}")
+        print(f"✅ Chaîne multicast: {APP.chaine_multicast}")
+    except Exception as e:
+        print(f"❌ Erreur initialisation: {e}")
+        return
 
+    # ... rest of the main loop ...
 
 if __name__ == "__main__":
     main()

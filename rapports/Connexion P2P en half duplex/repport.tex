@@ -1,0 +1,139 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\geometry{margin=2cm}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+
+\lstset{style=mystyle}
+
+\title{Système de Connexion Pair-à-Pair en Half Duplex}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+Ce rapport présente le sous-système de connexion entre deux appareils développé en Python. Le système utilise une architecture client-serveur avec un mécanisme de codage personnalisé pour faciliter l'établissement de la connexion.
+
+\section{Architecture Générale}
+Le système se compose de deux composants principaux :
+\begin{itemize}
+    \item \textbf{server.py} : Application serveur qui écoute les connexions entrantes
+    \item \textbf{client.py} : Application cliente qui initie la connexion au serveur
+\end{itemize}
+
+\section{Mécanisme de Connexion}
+
+\subsection{Détection d'Adresse IP}
+Le serveur utilise la fonction \texttt{get\_local\_ip()} pour déterminer automatiquement son adresse IP locale :
+\begin{itemize}
+    \item Priorité aux interfaces réseau (via \texttt{netifaces})
+    \item Fallback sur l'adresse de l'hôte local
+    \item Filtrage des adresses privées (192.168.*, 10.*)
+\end{itemize}
+
+\subsection{Système de Codage de Connexion}
+
+\subsubsection{Base 64 Personnalisée}
+Une base 64 personnalisée est définie : 
+
+\texttt{"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!?"}
+
+\subsubsection{Encodage (Côté Serveur)}
+La fonction \texttt{encode\_connexion\_code()} transforme l'IP et le port en un code de 8 caractères :
+\begin{enumerate}
+    \item Conversion de l'IP en quatre segments binaires de 8 bits
+    \item Conversion du port en binaire sur 16 bits
+    \item Concatenation en une chaîne binaire de 48 bits
+    \item Découpage en 8 segments de 6 bits
+    \item Conversion de chaque segment en caractère base64
+\end{enumerate}
+
+\subsubsection{Décodage (Côté Client)}
+La fonction \texttt{decode\_connexion\_code()} effectue l'opération inverse :
+\begin{enumerate}
+    \item Conversion de chaque caractère en valeur binaire 6 bits
+    \item Reconstruction de la chaîne binaire complète (48 bits)
+    \item Extraction des composants IP (32 bits) et port (16 bits)
+    \item Conversion en format IP décimal et port entier
+\end{enumerate}
+
+\section{Protocole de Communication}
+
+\subsection{Établissement de Connexion}
+\begin{enumerate}
+    \item Le serveur démarre et affiche le code de connexion
+    \item Le client décode le code pour obtenir IP et port
+    \item Connexion TCP standard via \texttt{socket.connect()}
+    \item Message de bienvenue envoyé par le serveur
+\end{enumerate}
+
+\subsection{Système de Chat}
+Le protocole de communication suit un modèle half-duplex :
+\begin{itemize}
+    \item Alternance stricte des messages client-serveur
+    \item Taille de buffer fixe à 1024 octets
+    \item Gestion basique de fin de session via intérruption clavier
+\end{itemize}
+
+\section{Avantages du Système}
+
+\subsection{Simplicité d'Utilisation}
+\begin{itemize}
+    \item Code de connexion facile à communiquer (8 caractères)
+    \item Détection automatique de l'adresse réseau
+    \Interface texte simple et intuitive
+\end{itemize}
+
+\subsection{Robustesse}
+\begin{itemize}
+    \item Gestion des erreurs de connexion
+    \item Fallback en cas d'échec de détection d'IP
+    \item Fermeture propre des sockets
+\end{itemize}
+
+\subsection{Portabilité}
+\begin{itemize}
+    \item Utilisation de bibliothèques Python standard
+    \item Compatible avec différentes plateformes
+    \item Indépendant de la configuration réseau spécifique
+\end{itemize}
+
+\section{Limitations Identifiées}
+
+\begin{itemize}
+    \item Dépendance optionnelle à \texttt{netifaces} (installation requise)
+    \item Gestion basique des erreurs réseau
+    \item Code de connexion limité aux adresses IPv4
+\end{itemize}
+
+\end{document}
