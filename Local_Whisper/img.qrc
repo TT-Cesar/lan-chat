@@ -1,0 +1,18 @@
+<RCC>
+    <qresource prefix="/img">
+        <file>img/icons8-customer-50.png</file>
+        <file>img/icons8-server-50.png</file>
+        <file>img/logo.svg</file>
+        <file>img/LocalWhisper_Logo_Violet.png</file>
+        <file>img/server.png</file>
+        <file>img/client.png</file>
+        <file>img/icons8-return-64.png</file>
+        <file>img/icons8-spinner.gif</file>
+        <file>img/icons8-iphone-spinner-64.png</file>
+        <file>img/Envelope.png</file>
+        <file>img/Sent.png</file>
+    </qresource>
+    <qresource prefix="/">
+        <file>img/icons8-shushing-face-94.png</file>
+    </qresource>
+</RCC>

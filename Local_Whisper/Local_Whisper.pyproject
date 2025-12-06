@@ -1,0 +1,10 @@
+{
+    "files": [
+        "widget.py",
+        "form.ui",
+        "img.qrc",
+        "secondpage.ui",
+        "messagepage.ui",
+        "SecondPage2.ui"
+    ]
+}

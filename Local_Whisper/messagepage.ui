@@ -1,0 +1,256 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Form</class>
+ <widget class="QWidget" name="Form">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1106</width>
+    <height>806</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Form</string>
+  </property>
+  <widget class="QFrame" name="header">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1091</width>
+     <height>81</height>
+    </rect>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">background: #16161E;
+    border-bottom: 1px solid #34354A;
+</string>
+   </property>
+   <property name="frameShape">
+    <enum>QFrame::Shape::StyledPanel</enum>
+   </property>
+   <property name="frameShadow">
+    <enum>QFrame::Shadow::Raised</enum>
+   </property>
+   <widget class="QPushButton" name="btn_back">
+    <property name="geometry">
+     <rect>
+      <x>20</x>
+      <y>0</y>
+      <width>81</width>
+      <height>70</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">image: url(:/img/img/icons8-return-64.png);
+background: transparent;
+    border: none;</string>
+    </property>
+    <property name="text">
+     <string/>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label">
+    <property name="geometry">
+     <rect>
+      <x>230</x>
+      <y>10</y>
+      <width>91</width>
+      <height>61</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:12pt; font-weight:700;&quot;&gt;Chat avec :&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_contact">
+    <property name="geometry">
+     <rect>
+      <x>370</x>
+      <y>20</y>
+      <width>181</width>
+      <height>71</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>textlabel</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_status">
+    <property name="geometry">
+     <rect>
+      <x>980</x>
+      <y>30</y>
+      <width>20</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">QLabel{
+	background-color: rgb(208, 160, 64);
+     /* Forme ronde */
+     min-width: 18px;
+    max-width: 18px;
+    min-height: 18px;
+    max-height: 18px;
+    border-radius: 9px;
+	color: rgb(255, 175, 94);
+    
+    /* Couleur par défaut (déconnecté) */
+    background-color: #47af40;
+    
+    /* Effet de brillance subtil */
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+background-color: rgb(71, 175, 64);</string>
+    </property>
+    <property name="text">
+     <string/>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_2">
+    <property name="geometry">
+     <rect>
+      <x>870</x>
+      <y>0</y>
+      <width>58</width>
+      <height>71</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:12pt; font-weight:700;&quot;&gt;Statut&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+    </property>
+   </widget>
+  </widget>
+  <widget class="QFrame" name="footer">
+   <property name="geometry">
+    <rect>
+     <x>-20</x>
+     <y>740</y>
+     <width>1091</width>
+     <height>82</height>
+    </rect>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">QFrame#footer {
+    background: #1A1B26;
+    border-top: 1px solid #34354A;
+    padding: 10px;
+    min-height: 60px;
+    max-height: 60px;
+}</string>
+   </property>
+   <property name="frameShape">
+    <enum>QFrame::Shape::StyledPanel</enum>
+   </property>
+   <property name="frameShadow">
+    <enum>QFrame::Shadow::Raised</enum>
+   </property>
+   <widget class="QLabel" name="label_3">
+    <property name="geometry">
+     <rect>
+      <x>20</x>
+      <y>10</y>
+      <width>81</width>
+      <height>41</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string/>
+    </property>
+    <property name="pixmap">
+     <pixmap resource="img.qrc">:/img/img/Envelope.png</pixmap>
+    </property>
+   </widget>
+   <widget class="QLineEdit" name="input_message">
+    <property name="geometry">
+     <rect>
+      <x>110</x>
+      <y>10</y>
+      <width>841</width>
+      <height>51</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">QLineEdit#input_message {
+    background: #24283B;
+    border: 1px solid #34354A;
+    border-radius: 20px;
+    padding: 8px 15px;
+    color: #E0E0E0;
+    font-size: 14px;
+}</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="btn_send">
+    <property name="geometry">
+     <rect>
+      <x>970</x>
+      <y>10</y>
+      <width>91</width>
+      <height>51</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">image: url(:/img/img/Sent.png);
+background: transparent;
+    border: none;
+</string>
+    </property>
+    <property name="text">
+     <string/>
+    </property>
+   </widget>
+  </widget>
+  <widget class="QScrollArea" name="scroll_messages">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>80</y>
+     <width>1071</width>
+     <height>661</height>
+    </rect>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">QScrollArea#scroll_messages {
+    background: #0F0F1A;
+    border: none;
+}
+</string>
+   </property>
+   <property name="widgetResizable">
+    <bool>true</bool>
+   </property>
+   <widget class="QWidget" name="scrollAreaWidgetContents">
+    <property name="geometry">
+     <rect>
+      <x>0</x>
+      <y>0</y>
+      <width>1071</width>
+      <height>661</height>
+     </rect>
+    </property>
+    <widget class="QWidget" name="widget_messages" native="true">
+     <property name="geometry">
+      <rect>
+       <x>0</x>
+       <y>10</y>
+       <width>1061</width>
+       <height>631</height>
+      </rect>
+     </property>
+     <property name="styleSheet">
+      <string notr="true">QWidget#widget_messages {
+    background: #0F0F1A;
+}</string>
+     </property>
+    </widget>
+   </widget>
+  </widget>
+ </widget>
+ <resources>
+  <include location="img.qrc"/>
+ </resources>
+ <connections/>
+</ui>
