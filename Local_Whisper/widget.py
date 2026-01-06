@@ -174,13 +174,6 @@ class Widget(QWidget):
             else:
                 QMessageBox.warning(self, "Code invalide", "Le code doit contenir 8 caractères")
 
-    def lancer_client(self, code):
-        """Lance le client dans un thread séparé"""
-        try:
-            start_client(code)  # Ta fonction client existante
-        except Exception as e:
-            print(f"Erreur client: {e}")
-
     def open_chat_page(self):
         """Ouvre la page de chat"""
         # À implémenter selon ton UI
