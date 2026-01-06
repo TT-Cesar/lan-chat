@@ -9,7 +9,7 @@ git clone https://github.com/TT-Cesar/lan-chat.git
 cd lan-chat
 ```
 ## Lancement
-    L'executable est déjà compilé et dans le dossier "./dist"
+L'executable est déjà compilé et dans le dossier "./dist"
 
 ### Windows
 Double-cliquer sur le fichier `LocalWhisper.exe` dans le dossier `./dist`.
