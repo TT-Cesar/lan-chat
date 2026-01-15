@@ -22,9 +22,10 @@ Double-cliquer sur le fichier `LocalWhisper.exe` dans le dossier `./dist`.
 
 ### Linux(Ubuntu/Debian)
 
-Ouvrir un terminal et naviguer jusqu'au dossier `./dist`, puis exécuter la commande :
+Ouvrir un terminal et naviguer jusqu'au dossier `./dist`, puis exécuter les commandes :
 
 ```bash
+chmod +x Local_Whisper 
 ./LocalWhisper
 ```
 
